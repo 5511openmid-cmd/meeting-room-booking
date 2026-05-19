@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>会議室予約フォーム</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- Firebase SDK -->
+<script type="module" id="firebase-init">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import {
+    getFirestore, collection, getDocs, addDoc, deleteDoc, doc, onSnapshot, setDoc
+  } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBonjhE0utGUfLN3NeKxPs18QFlYybK0Gs",
+    authDomain: "room-booking-55a00.firebaseapp.com",
+    projectId: "room-booking-55a00",
+    storageBucket: "room-booking-55a00.firebasestorage.app",
+    messagingSenderId: "635521515179",
+    appId: "1:635521515179:web:ab893fdd99d4b3ca6501ee",
+    measurementId: "G-1G90VD3GH7"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // グローバルに公開（Reactから使えるように）
+  window.__db = db;
+  window.__fs = {
+    collection, getDocs, addDoc, deleteDoc, doc, onSnapshot, setDoc
+  };
+  window.__firebaseReady = true;
+  window.dispatchEvent(new Event("firebaseReady"));
+</script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Hiragino Sans', 'Noto Sans JP', 'Meiryo', sans-serif; background: linear-gradient(135deg,#f0f4ff 0%,#faf5ff 100%); min-height: 100vh; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+// ── 定数 ──────────────────────────────────────────────
+const ROOMS = ["3F商談室", "4F商談室"];
+const OPEN_HOUR = 9, CLOSE_HOUR = 19, FREE_HOURS = 40, EXTRA_RATE = 2000, SLOT_COUNT = 30;
+const CANCEL_MINUTES = 20; // キャンセル受付締切（開始何分前まで）
+const OWNER_PASSWORD = "owner1234";
+const hours = Array.from({ length: CLOSE_HOUR - OPEN_HOUR }, (_, i) => OPEN_HOUR + i);
+const initTenants = Array.from({ length: SLOT_COUNT }, (_, i) => ({ id: `t${i+1}`, name: `テナント ${i+1}` }));
+const WEEKDAYS = ["日","月","火","水","木","金","土"];
+
+function generateId() { return Math.random().toString(36).slice(2,9); }
+function today() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function fmt(h) { return `${h}:00`; }
+function calcUsedHours(bookings, tid) { return bookings.filter(b=>b.tenantId===tid).reduce((s,b)=>s+(b.end-b.start),0); }
+function calcExtraCharge(h) { const e=h-FREE_HOURS; return e>0?e*EXTRA_RATE:0; }
+function addMonths(date, n) { const d=new Date(date); d.setMonth(d.getMonth()+n); return d; }
+function addWeeks(date, n) { const d=new Date(date); d.setDate(d.getDate()+n*7); return d; }
+function canCancel(booking) {
+  // 予約開始のCANCEL_MINUTES分前を過ぎていたらキャンセル不可
+  const start = new Date(`${booking.date}T${String(booking.start).padStart(2,"0")}:00:00`);
+  const limit = new Date(start.getTime() - CANCEL_MINUTES * 60 * 1000);
+  return new Date() <= limit;
+}
+function toYMD(date) { return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`; }
+
+// ── スタイル定数 ──────────────────────────────────────
+const card = {background:"#fff",borderRadius:16,padding:"20px",marginBottom:16,border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,0.04)"};
+const sel = {width:"100%",padding:"9px 10px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:14,background:"#f8fafc",color:"#1e293b",outline:"none"};
+const inp = {width:"100%",padding:"9px 10px",borderRadius:8,border:"1.5px solid #e2e8f0",fontSize:14,background:"#f8fafc",color:"#1e293b",outline:"none",boxSizing:"border-box"};
+const btnP = {marginTop:14,width:"100%",padding:"13px",borderRadius:10,border:"none",background:"linear-gradient(90deg,#6366f1,#4f46e5)",color:"#fff",fontWeight:800,fontSize:15,cursor:"pointer",boxShadow:"0 4px 14px rgba(79,70,229,0.25)"};
+
+function Label({children}) { return <div style={{fontWeight:800,fontSize:15,color:"#1e293b"}}>{children}</div>; }
+function SubLabel({children}) { return <div style={{fontWeight:700,fontSize:13,color:"#64748b",marginBottom:8}}>{children}</div>; }
+function Field({label,children}) { return <div><div style={{fontSize:12,fontWeight:600,color:"#64748b",marginBottom:4}}>{label}</div>{children}</div>; }
+function Empty({children}) { return <div style={{padding:"20px 0",textAlign:"center",color:"#94a3b8",fontSize:14}}>{children}</div>; }
+
+function BookingRow({b,tenants,onDelete,showDelete,showTenant,isOwner}) {
+  const name=tenants.find(t=>t.id===b.tenantId)?.name||"?";
+  const ok=canCancel(b);
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 0",borderBottom:"1px solid #f1f5f9"}}>
+      <div style={{fontSize:14,color:"#334155",flex:1,minWidth:0}}>
+        <span style={{fontWeight:700,color:"#4f46e5"}}>{b.room}</span>
+        <span style={{margin:"0 6px",color:"#cbd5e1"}}>|</span>{b.date}
+        <span style={{margin:"0 6px",color:"#cbd5e1"}}>|</span>{b.start}:00〜{b.end}:00
+        {showTenant&&<span style={{marginLeft:6,fontSize:12,background:"#ede9fe",color:"#6d28d9",borderRadius:6,padding:"2px 7px",fontWeight:700}}>{name}</span>}
+        {showDelete&&!ok&&!isOwner&&<span style={{marginLeft:6,fontSize:11,color:"#94a3b8"}}>（キャンセル締切済）</span>}
+      </div>
+      {showDelete&&(
+        isOwner
+          ? <button onClick={onDelete} style={{background:"#fff1f2",border:"none",borderRadius:6,padding:"5px 10px",color:"#e11d48",fontWeight:700,fontSize:12,cursor:"pointer",marginLeft:8,flexShrink:0}}>削除</button>
+          : ok
+            ? <button onClick={onDelete} style={{background:"#fff1f2",border:"none",borderRadius:6,padding:"5px 10px",color:"#e11d48",fontWeight:700,fontSize:12,cursor:"pointer",marginLeft:8,flexShrink:0}}>キャンセル</button>
+            : <span style={{marginLeft:8,fontSize:11,color:"#cbd5e1",flexShrink:0}}>締切</span>
+      )}
+    </div>
+  );
+}
+
+// ── 空き状況カレンダー ────────────────────────────────
+function AvailabilityCalendar({bookings}) {
+  const [mode, setMode] = useState("month");
+  const [baseDate, setBaseDate] = useState(new Date());
+
+  const monthDays = useMemo(() => {
+    const year = baseDate.getFullYear();
+    const month = baseDate.getMonth();
+    const first = new Date(year, month, 1);
+    const last = new Date(year, month+1, 0);
+    const startWd = first.getDay();
+    const days = [];
+    for(let i=0; i<startWd; i++) days.push(null);
+    for(let d=1; d<=last.getDate(); d++) days.push(new Date(year, month, d));
+    return days;
+  }, [baseDate]);
+
+  const weekDays = useMemo(() => {
+    const start = new Date(baseDate);
+    start.setDate(start.getDate() - start.getDay());
+    return Array.from({length:7}, (_,i) => { const d=new Date(start); d.setDate(d.getDate()+i); return d; });
+  }, [baseDate]);
+
+  function getStatus(date) {
+    if(!date) return null;
+    const ymd = toYMD(date);
+    const dayBooks = bookings.filter(b=>b.date===ymd);
+    const totalSlots = ROOMS.length * (CLOSE_HOUR - OPEN_HOUR);
+    const usedSlots = dayBooks.reduce((s,b)=>s+(b.end-b.start),0);
+    if(usedSlots === 0) return "empty";
+    if(usedSlots >= totalSlots) return "full";
+    return "partial";
+  }
+
+  const statusColor = { empty:"#dcfce7", partial:"#fef9c3", full:"#fee2e2" };
+  const statusText = { empty:"○", partial:"△", full:"×" };
+  const statusTextColor = { empty:"#16a34a", partial:"#ca8a04", full:"#dc2626" };
+  const todayYmd = today();
+
+  function DayCell({date}) {
+    if(!date) return <div />;
+    const ymd = toYMD(date);
+    const status = getStatus(date);
+    const isToday = ymd === todayYmd;
+    const isPast = ymd < todayYmd;
+    return (
+      <div style={{borderRadius:8,padding:"6px 4px",textAlign:"center",background:isPast?"#f8fafc":statusColor[status],border:isToday?"2px solid #4f46e5":"1px solid #e2e8f0",opacity:isPast?0.45:1,minHeight:48}}>
+        <div style={{fontSize:12,fontWeight:isToday?800:600,color:isToday?"#4f46e5":"#334155"}}>{date.getDate()}</div>
+        {!isPast && <div style={{fontSize:16,fontWeight:800,color:statusTextColor[status]}}>{statusText[status]}</div>}
+      </div>
+    );
+  }
+
+  function WeekGrid() {
+    return (
+      <div style={{overflowX:"auto"}}>
+        <div style={{display:"grid",gridTemplateColumns:`60px repeat(${weekDays.length}, 1fr)`,gap:2,minWidth:500}}>
+          <div />
+          {weekDays.map((d,i) => {
+            const isToday = toYMD(d) === todayYmd;
+            return (
+              <div key={i} style={{textAlign:"center",padding:"6px 2px",borderRadius:6,background:isToday?"#ede9fe":"#f8fafc",fontWeight:700,fontSize:12,color:isToday?"#4f46e5":"#334155"}}>
+                <div>{WEEKDAYS[d.getDay()]}</div>
+                <div style={{fontSize:14}}>{d.getDate()}</div>
+              </div>
+            );
+          })}
+          {hours.map(h => (
+            <React.Fragment key={h}>
+              <div style={{fontSize:11,color:"#94a3b8",textAlign:"right",paddingRight:6,lineHeight:"32px"}}>{fmt(h)}</div>
+              {weekDays.map((d,di) => {
+                const ymd = toYMD(d);
+                const isPast = ymd < todayYmd;
+                const roomBooks = ROOMS.map(room => bookings.some(b=>b.room===room&&b.date===ymd&&h>=b.start&&h<b.end));
+                const bookedCount = roomBooks.filter(Boolean).length;
+                const bg = isPast?"#f8fafc":bookedCount===0?"#dcfce7":bookedCount===ROOMS.length?"#fee2e2":"#fef9c3";
+                const label = isPast?"":bookedCount===0?"○":bookedCount===ROOMS.length?"×":"△";
+                const lc = bookedCount===0?"#16a34a":bookedCount===ROOMS.length?"#dc2626":"#ca8a04";
+                return (
+                  <div key={di} style={{height:32,borderRadius:4,background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:lc,opacity:isPast?0.4:1}}>
+                    {label}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <section style={card}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:14}}>
+        <Label>空き状況カレンダー</Label>
+        <div style={{display:"flex",gap:6}}>
+          {["month","week"].map(m=>(
+            <button key={m} onClick={()=>setMode(m)} style={{padding:"5px 14px",borderRadius:20,border:"2px solid "+(mode===m?"#4f46e5":"#e2e8f0"),background:mode===m?"#4f46e5":"#fff",color:mode===m?"#fff":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+              {m==="month"?"月表示":"週表示"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:12,marginBottom:12}}>
+        <button onClick={()=>setBaseDate(mode==="month"?addMonths(baseDate,-1):addWeeks(baseDate,-1))} style={{padding:"5px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontWeight:700,fontSize:14}}>‹</button>
+        <span style={{fontWeight:700,fontSize:14,color:"#1e293b"}}>
+          {mode==="month"?`${baseDate.getFullYear()}年${baseDate.getMonth()+1}月`:`${weekDays[0].getMonth()+1}/${weekDays[0].getDate()} 〜 ${weekDays[6].getMonth()+1}/${weekDays[6].getDate()}`}
+        </span>
+        <button onClick={()=>setBaseDate(mode==="month"?addMonths(baseDate,1):addWeeks(baseDate,1))} style={{padding:"5px 12px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontWeight:700,fontSize:14}}>›</button>
+        <button onClick={()=>setBaseDate(new Date())} style={{padding:"4px 10px",borderRadius:8,border:"1px solid #e2e8f0",background:"#ede9fe",color:"#6d28d9",cursor:"pointer",fontWeight:700,fontSize:11}}>今日</button>
+      </div>
+      {mode==="month"?(
+        <>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:2}}>
+            {WEEKDAYS.map((w,i)=>(
+              <div key={w} style={{textAlign:"center",fontSize:11,fontWeight:700,color:i===0?"#ef4444":i===6?"#3b82f6":"#64748b",padding:"4px 0"}}>{w}</div>
+            ))}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
+            {monthDays.map((d,i)=><DayCell key={i} date={d} />)}
+          </div>
+        </>
+      ):<WeekGrid />}
+      <div style={{display:"flex",gap:12,marginTop:12,fontSize:12,color:"#64748b",flexWrap:"wrap"}}>
+        <span><span style={{color:"#16a34a",fontWeight:700}}>○</span> 全室空き</span>
+        <span><span style={{color:"#ca8a04",fontWeight:700}}>△</span> 一部空き</span>
+        <span><span style={{color:"#dc2626",fontWeight:700}}>×</span> 満室</span>
+      </div>
+    </section>
+  );
+}
+
+// ── オーナーログイン ──────────────────────────────────
+function OwnerLogin({onLogin}) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState(false);
+  function tryLogin() {
+    if(pw === OWNER_PASSWORD) { onLogin(); }
+    else { setErr(true); setPw(""); setTimeout(()=>setErr(false),2000); }
+  }
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#f0f4ff,#faf5ff)"}}>
+      <div style={{background:"#fff",borderRadius:20,padding:"36px 32px",width:"100%",maxWidth:360,boxShadow:"0 8px 40px rgba(79,70,229,0.12)",border:"1px solid #e2e8f0"}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:40,marginBottom:8}}>👑</div>
+          <div style={{fontWeight:800,fontSize:20,color:"#1e293b"}}>オーナーログイン</div>
+          <div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>パスワードを入力してください</div>
+        </div>
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&tryLogin()}
+          placeholder="パスワード"
+          style={{...inp,border:"1.5px solid "+(err?"#fda4af":"#e2e8f0"),marginBottom:12}} />
+        {err && <div style={{color:"#e11d48",fontSize:13,marginBottom:8,textAlign:"center"}}>❌ パスワードが違います</div>}
+        <button onClick={tryLogin} style={{...btnP,marginTop:4}}>ログイン</button>
+      </div>
+    </div>
+  );
+}
+
+// ── テナント名編集 ────────────────────────────────────
+function TenantEditor({tenants,bookings,onRename}) {
+  const [editId,setEditId]=useState(null);
+  const [draft,setDraft]=useState("");
+  const [search,setSearch]=useState("");
+  const filtered=tenants.filter(t=>t.name.includes(search));
+  function startEdit(t){setEditId(t.id);setDraft(t.name);}
+  function save(id){if(draft.trim())onRename(id,draft);setEditId(null);}
+  return (
+    <section style={card}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <Label>テナント名の編集</Label>
+        <input placeholder="🔍 絞り込み…" value={search} onChange={e=>setSearch(e.target.value)} style={{...inp,width:"auto",flex:1,minWidth:120,maxWidth:200}} />
+      </div>
+      <p style={{fontSize:12,color:"#94a3b8",margin:"6px 0 12px"}}>✏️ ボタンをクリックして名前を変更、Enterで確定</p>
+      <div style={{display:"grid",gap:6,maxHeight:360,overflowY:"auto",paddingRight:4}}>
+        {filtered.map(t=>{
+          const h=calcUsedHours(bookings,t.id); const over=h>FREE_HOURS;
+          return (
+            <div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 12px",borderRadius:10,background:over?"#fff1f2":"#f8fafc",border:"1px solid "+(over?"#fda4af":"#e2e8f0")}}>
+              <span style={{fontSize:12,color:"#94a3b8",minWidth:26,fontWeight:600}}>#{t.id.replace("t","")}</span>
+              {editId===t.id?(
+                <>
+                  <input autoFocus value={draft} onChange={e=>setDraft(e.target.value)}
+                    onKeyDown={e=>{if(e.key==="Enter")save(t.id);if(e.key==="Escape")setEditId(null);}}
+                    style={{...inp,flex:1,padding:"6px 10px",fontSize:13}} />
+                  <button onClick={()=>save(t.id)} style={{padding:"5px 10px",borderRadius:6,border:"none",background:"#4f46e5",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>保存</button>
+                  <button onClick={()=>setEditId(null)} style={{padding:"5px 8px",borderRadius:6,border:"none",background:"#f1f5f9",color:"#64748b",fontWeight:700,fontSize:12,cursor:"pointer"}}>×</button>
+                </>
+              ):(
+                <>
+                  <span style={{flex:1,fontWeight:600,fontSize:14}}>{t.name}</span>
+                  <span style={{fontSize:12,color:over?"#e11d48":"#94a3b8",fontWeight:700}}>{h}h</span>
+                  <button onClick={()=>startEdit(t)} style={{padding:"5px 10px",borderRadius:6,border:"none",background:"#ede9fe",color:"#6d28d9",fontWeight:700,fontSize:12,cursor:"pointer"}}>✏️</button>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// ── テナント別集計 ────────────────────────────────────
+function TenantSummary({tenants,bookings}) {
+  const [search,setSearch]=useState("");
+  const [onlyOver,setOnlyOver]=useState(false);
+  const list=tenants.map(t=>{const h=calcUsedHours(bookings,t.id);return{...t,h,c:calcExtraCharge(h),pct:Math.min((h/FREE_HOURS)*100,100),over:h>FREE_HOURS};}).filter(i=>i.name.includes(search)&&(!onlyOver||i.over));
+  return (
+    <section style={card}>
+      <Label>テナント別使用時間・料金</Label>
+      <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap",alignItems:"center"}}>
+        <input placeholder="🔍 検索…" value={search} onChange={e=>setSearch(e.target.value)} style={{...inp,flex:1,minWidth:140}} />
+        <button onClick={()=>setOnlyOver(v=>!v)} style={{padding:"8px 12px",borderRadius:8,border:"2px solid "+(onlyOver?"#e11d48":"#e2e8f0"),background:onlyOver?"#fff1f2":"#f8fafc",color:onlyOver?"#e11d48":"#64748b",fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>⚠️ 超過のみ</button>
+        <span style={{fontSize:12,color:"#94a3b8"}}>{list.length}/{tenants.length}件</span>
+      </div>
+      <div style={{display:"grid",gap:8,marginTop:12,maxHeight:400,overflowY:"auto",paddingRight:4}}>
+        {list.length===0?<Empty>該当なし</Empty>:list.map(({id,name,h,c,pct,over})=>(
+          <div key={id} style={{padding:"12px 14px",borderRadius:10,background:over?"#fff1f2":"#f8fafc",border:"1px solid "+(over?"#fda4af":"#e2e8f0")}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+              <span style={{fontWeight:700}}>{name}</span>
+              <span style={{fontWeight:800,color:over?"#e11d48":"#4f46e5"}}>{h}h{over&&<span style={{fontSize:12}}> / ¥{c.toLocaleString()}</span>}</span>
+            </div>
+            <div style={{background:"#e2e8f0",borderRadius:99,height:8}}><div style={{width:pct+"%",height:"100%",borderRadius:99,background:over?"#f43f5e":"#6366f1",transition:"width .4s"}} /></div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ── ローディング画面 ──────────────────────────────────
+function Loading() {
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#f0f4ff,#faf5ff)"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:16}}>🔥</div>
+        <div style={{fontWeight:800,fontSize:18,color:"#4f46e5",marginBottom:8}}>Firebase に接続中...</div>
+        <div style={{fontSize:13,color:"#94a3b8"}}>しばらくお待ちください</div>
+      </div>
+    </div>
+  );
+}
+
+// ── メインアプリ ──────────────────────────────────────
+function App() {
+  const [firebaseReady, setFirebaseReady] = useState(!!window.__firebaseReady);
+  const [tenants, setTenants] = useState(initTenants);
+  const [bookings, setBookings] = useState([]);
+  const [view, setView] = useState("tenant");
+  const [ownerAuthed, setOwnerAuthed] = useState(false);
+  const [currentId, setCurrentId] = useState(initTenants[0].id);
+  const [form, setForm] = useState({room:ROOMS[0],date:today(),start:OPEN_HOUR,end:OPEN_HOUR+1});
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  // Firebase 準備待ち
+  useEffect(() => {
+    if(window.__firebaseReady) { setFirebaseReady(true); return; }
+    const handler = () => setFirebaseReady(true);
+    window.addEventListener("firebaseReady", handler);
+    return () => window.removeEventListener("firebaseReady", handler);
+  }, []);
+
+  // Firestore リアルタイム購読
+  useEffect(() => {
+    if(!firebaseReady) return;
+    const db = window.__db;
+    const { collection, onSnapshot } = window.__fs;
+
+    // 予約データをリアルタイム取得
+    const unsubBookings = onSnapshot(collection(db, "bookings"), snap => {
+      const data = snap.docs.map(d => ({id: d.id, ...d.data()}));
+      setBookings(data);
+    });
+
+    // テナント名をリアルタイム取得
+    const unsubTenants = onSnapshot(collection(db, "tenants"), snap => {
+      if(snap.empty) {
+        // 初回：Firestoreにデフォルトテナントを保存
+        initTenants.forEach(t => {
+          const { doc, setDoc } = window.__fs;
+          setDoc(doc(db, "tenants", t.id), { name: t.name });
+        });
+      } else {
+        const data = snap.docs.map(d => ({id: d.id, ...d.data()}));
+        // initTenantsの順序を維持してマージ
+        const merged = initTenants.map(t => {
+          const found = data.find(d => d.id === t.id);
+          return found ? found : t;
+        });
+        setTenants(merged);
+      }
+    });
+
+    return () => { unsubBookings(); unsubTenants(); };
+  }, [firebaseReady]);
+
+  const currentTenant = tenants.find(t=>t.id===currentId) || tenants[0];
+
+  // テナント名変更 → Firestore に保存
+  async function renameTenant(id, newName) {
+    const db = window.__db;
+    const { doc, setDoc } = window.__fs;
+    await setDoc(doc(db, "tenants", id), { name: newName.trim() });
+  }
+
+  // 予約追加 → Firestore に保存
+  async function addBooking() {
+    setError(""); setSuccess("");
+    const {room, date} = form;
+    const s = Number(form.start);
+    const e = Number(form.end);
+    if(s >= e) { setError("終了時刻は開始時刻より後にしてください。"); return; }
+    if(s < OPEN_HOUR || e > CLOSE_HOUR) { setError(`予約可能時間は${fmt(OPEN_HOUR)}〜${fmt(CLOSE_HOUR)}です。`); return; }
+    const conflict = bookings.some(b=>b.room===room&&b.date===date&&s<b.end&&e>b.start);
+    if(conflict) { setError("その時間帯はすでに予約が入っています。"); return; }
+
+    const db = window.__db;
+    const { collection, addDoc } = window.__fs;
+    await addDoc(collection(db, "bookings"), {
+      room, date, start: s, end: e, tenantId: currentId
+    });
+    setSuccess("予約を受け付けました！");
+  }
+
+  // 予約削除 → Firestore から削除
+  async function removeBooking(id) {
+    const db = window.__db;
+    const { doc, deleteDoc } = window.__fs;
+    await deleteDoc(doc(db, "bookings", id));
+  }
+
+  const usedHours = calcUsedHours(bookings, currentId);
+  const charge = calcExtraCharge(usedHours);
+  const progressPct = Math.min((usedHours/FREE_HOURS)*100, 100);
+  const isOver = usedHours > FREE_HOURS;
+  const todayStr = today();
+
+  function TimeGrid({room, date}) {
+    const dayBooks = bookings.filter(b=>b.room===room&&b.date===date);
+    return (
+      <div style={{display:"flex",gap:2,overflowX:"auto",marginTop:6,paddingBottom:4}}>
+        {hours.map(h=>{
+          const slot = dayBooks.find(b=>h>=b.start&&h<b.end);
+          const name = slot ? tenants.find(t=>t.id===slot.tenantId)?.name||"?" : "";
+          return (
+            <div key={h} style={{minWidth:44,height:48,borderRadius:6,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:600,background:slot?"#4f46e5":"#f1f5f9",color:slot?"#fff":"#94a3b8",border:"1px solid "+(slot?"#4338ca":"#e2e8f0"),flexShrink:0}}>
+              <span>{fmt(h)}</span>
+              {slot&&<span style={{fontSize:7,opacity:.85,maxWidth:38,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function handleOwnerClick() {
+    if(ownerAuthed) { setView("owner"); }
+    else { setView("owner-login"); }
+  }
+  function handleOwnerLogin() { setOwnerAuthed(true); setView("owner"); }
+  function handleOwnerLogout() { setOwnerAuthed(false); setView("tenant"); }
+
+  if(!firebaseReady) return <Loading />;
+  if(view==="owner-login") return <OwnerLogin onLogin={handleOwnerLogin} />;
+
+  return (
+    <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#f0f4ff 0%,#faf5ff 100%)",paddingBottom:60}}>
+      <header style={{background:"#4f46e5",color:"#fff",padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 20px rgba(79,70,229,0.33)",flexWrap:"wrap",gap:8}}>
+        <div>
+          <div style={{fontSize:10,letterSpacing:2,opacity:.75,textTransform:"uppercase"}}>ROOM BOOKING</div>
+          <div style={{fontSize:20,fontWeight:800,letterSpacing:-0.5}}>会議室予約フォーム</div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          <button onClick={()=>setView("tenant")} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="tenant"?"#fff":"rgba(255,255,255,.18)",color:view==="tenant"?"#4f46e5":"#fff"}}>🏢 テナント</button>
+          <button onClick={handleOwnerClick} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="owner"?"#fff":"rgba(255,255,255,.18)",color:view==="owner"?"#4f46e5":"#fff"}}>👑 オーナー</button>
+          {view==="owner"&&ownerAuthed&&(
+            <button onClick={handleOwnerLogout} style={{padding:"5px 10px",borderRadius:20,border:"1px solid rgba(255,255,255,.4)",fontWeight:700,fontSize:11,cursor:"pointer",background:"transparent",color:"rgba(255,255,255,.8)"}}>ログアウト</button>
+          )}
+          {/* Firebase接続インジケーター */}
+          <div style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"rgba(255,255,255,0.85)",background:"rgba(255,255,255,0.15)",borderRadius:20,padding:"4px 10px"}}>
+            <span style={{width:7,height:7,borderRadius:"50%",background:"#4ade80",display:"inline-block",flexShrink:0}}></span>
+            Firebase同期中
+          </div>
+        </div>
+      </header>
+
+      <div style={{maxWidth:860,margin:"0 auto",padding:"20px 14px"}}>
+
+        {/* ─── テナント画面 ─── */}
+        {view==="tenant"&&(<>
+          <section style={card}>
+            <Label>ログイン中のテナント</Label>
+            <div style={{marginTop:10}}>
+              <select value={currentId} onChange={e=>{setCurrentId(e.target.value);setError("");setSuccess("");}} style={sel}>
+                {tenants.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+          </section>
+
+          <AvailabilityCalendar bookings={bookings} />
+
+          <section style={{...card,background:isOver?"#fff1f2":"#fff",borderColor:isOver?"#fda4af":"#e2e8f0"}}>
+            <Label>{currentTenant.name} の月間使用状況</Label>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",margin:"10px 0 6px"}}>
+              <span style={{fontSize:36,fontWeight:900,color:isOver?"#e11d48":"#4f46e5"}}>{usedHours}<span style={{fontSize:16,fontWeight:600}}>h</span></span>
+              <span style={{fontSize:13,color:"#64748b"}}>無料枠 {FREE_HOURS}h</span>
+            </div>
+            <div style={{background:"#f1f5f9",borderRadius:99,height:12,overflow:"hidden"}}>
+              <div style={{width:progressPct+"%",height:"100%",borderRadius:99,background:isOver?"linear-gradient(90deg,#f43f5e,#e11d48)":"linear-gradient(90deg,#818cf8,#4f46e5)",transition:"width .5s ease"}} />
+            </div>
+            {isOver&&<div style={{marginTop:12,padding:"10px 14px",background:"#ffe4e6",borderRadius:10,color:"#be123c",fontWeight:700,fontSize:14}}>⚠️ 超過 {usedHours-FREE_HOURS}h ／ 追加料金 ¥{charge.toLocaleString()}</div>}
+            {!isOver&&usedHours>0&&<div style={{marginTop:10,fontSize:13,color:"#64748b"}}>残り <b style={{color:"#4f46e5"}}>{FREE_HOURS-usedHours}h</b> まで無料</div>}
+          </section>
+
+          <section style={card}>
+            <Label>新規予約</Label>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:10}}>
+              <Field label="部屋"><select value={form.room} onChange={e=>setForm({...form,room:e.target.value})} style={sel}>{ROOMS.map(r=><option key={r}>{r}</option>)}</select></Field>
+              <Field label="日付"><input type="date" value={form.date} min={todayStr} onChange={e=>setForm({...form,date:e.target.value})} style={inp} /></Field>
+              <Field label="開始"><select value={form.start} onChange={e=>setForm({...form,start:Number(e.target.value)})} style={sel}>{hours.map(h=><option key={h} value={h}>{fmt(h)}</option>)}</select></Field>
+              <Field label="終了"><select value={form.end} onChange={e=>setForm({...form,end:Number(e.target.value)})} style={sel}>{hours.slice(1).concat([CLOSE_HOUR]).map(h=><option key={h} value={h}>{fmt(h)}</option>)}</select></Field>
+            </div>
+            {error&&<div style={{marginTop:10,padding:"9px 14px",background:"#fff1f2",border:"1px solid #fda4af",borderRadius:8,color:"#be123c",fontSize:13}}>❌ {error}</div>}
+            {success&&<div style={{marginTop:10,padding:"9px 14px",background:"#f0fdf4",border:"1px solid #86efac",borderRadius:8,color:"#15803d",fontSize:13}}>✅ {success}</div>}
+            <button onClick={addBooking} style={btnP}>予約する</button>
+          </section>
+
+          <section style={card}>
+            <Label>予約済み一覧（{currentTenant.name}）</Label>
+            {bookings.length===0?<Empty>予約はまだありません</Empty>
+              :[...bookings].filter(b=>b.tenantId===currentId).sort((a,b)=>a.date.localeCompare(b.date)).map(b=><BookingRow key={b.id} b={b} tenants={tenants} onDelete={()=>removeBooking(b.id)} showDelete isOwner={false} />)}
+          </section>
+        </>)}
+
+        {/* ─── オーナー画面 ─── */}
+        {view==="owner"&&ownerAuthed&&(<>
+          <TenantEditor tenants={tenants} bookings={bookings} onRename={renameTenant} />
+          <AvailabilityCalendar bookings={bookings} />
+          <section style={card}>
+            <Label>本日のタイムライン（{todayStr}）</Label>
+            {ROOMS.map(room=>(<div key={room} style={{marginTop:16}}>
+              <div style={{fontWeight:700,color:"#4f46e5",marginBottom:4}}>{room}</div>
+              <TimeGrid room={room} date={todayStr} />
+            </div>))}
+            <div style={{marginTop:10,display:"flex",gap:12,fontSize:12,color:"#94a3b8"}}>
+              <span><span style={{display:"inline-block",width:12,height:12,background:"#4f46e5",borderRadius:3,marginRight:4}} />予約済</span>
+              <span><span style={{display:"inline-block",width:12,height:12,background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:3,marginRight:4}} />空き</span>
+            </div>
+          </section>
+          <TenantSummary tenants={tenants} bookings={bookings} />
+          <section style={card}>
+            <Label>全予約一覧</Label>
+            {bookings.length===0?<Empty>予約はまだありません</Empty>
+              :[...bookings].sort((a,b)=>a.date.localeCompare(b.date)).map(b=><BookingRow key={b.id} b={b} tenants={tenants} onDelete={()=>removeBooking(b.id)} showDelete showTenant isOwner={true} />)}
+          </section>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
