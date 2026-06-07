@@ -7,6 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <!-- Firebase SDK -->
 <script type="module" id="firebase-init">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
@@ -27,7 +28,6 @@
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
-  // グローバルに公開（Reactから使えるように）
   window.__db = db;
   window.__fs = {
     collection, getDocs, addDoc, deleteDoc, doc, onSnapshot, setDoc
@@ -41,23 +41,28 @@ body { font-family: 'Hiragino Sans', 'Noto Sans JP', 'Meiryo', sans-serif; backg
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: #f1f5f9; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 99px; }
+@media print {
+  .no-print { display: none !important; }
+  .qr-grid { display: grid !important; grid-template-columns: repeat(3,1fr) !important; }
+}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 // ── 定数 ──────────────────────────────────────────────
 const ROOMS = ["3F商談室", "4F商談室"];
 const OPEN_HOUR = 9, CLOSE_HOUR = 19, FREE_HOURS = 40, EXTRA_RATE = 2000, SLOT_COUNT = 30;
-const CANCEL_MINUTES = 20; // キャンセル受付締切（開始何分前まで）
+const CANCEL_MINUTES = 20;
 const OWNER_PASSWORD = "owner1234";
 const hours = Array.from({ length: CLOSE_HOUR - OPEN_HOUR }, (_, i) => OPEN_HOUR + i);
 const initTenants = Array.from({ length: SLOT_COUNT }, (_, i) => ({ id: `t${i+1}`, name: `テナント ${i+1}` }));
 const WEEKDAYS = ["日","月","火","水","木","金","土"];
 
 function generateId() { return Math.random().toString(36).slice(2,9); }
+function generateToken() { return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2); }
 function today() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmt(h) { return `${h}:00`; }
 function calcUsedHours(bookings, tid) { return bookings.filter(b=>b.tenantId===tid).reduce((s,b)=>s+(b.end-b.start),0); }
@@ -65,12 +70,15 @@ function calcExtraCharge(h) { const e=h-FREE_HOURS; return e>0?e*EXTRA_RATE:0; }
 function addMonths(date, n) { const d=new Date(date); d.setMonth(d.getMonth()+n); return d; }
 function addWeeks(date, n) { const d=new Date(date); d.setDate(d.getDate()+n*7); return d; }
 function canCancel(booking) {
-  // 予約開始のCANCEL_MINUTES分前を過ぎていたらキャンセル不可
   const start = new Date(`${booking.date}T${String(booking.start).padStart(2,"0")}:00:00`);
   const limit = new Date(start.getTime() - CANCEL_MINUTES * 60 * 1000);
   return new Date() <= limit;
 }
 function toYMD(date) { return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`; }
+function tenantUrl(token) {
+  const base = window.location.origin + window.location.pathname;
+  return `${base}?token=${token}`;
+}
 
 // ── スタイル定数 ──────────────────────────────────────
 const card = {background:"#fff",borderRadius:16,padding:"20px",marginBottom:16,border:"1px solid #e2e8f0",boxShadow:"0 2px 12px rgba(0,0,0,0.04)"};
@@ -102,6 +110,43 @@ function BookingRow({b,tenants,onDelete,showDelete,showTenant,isOwner}) {
             ? <button onClick={onDelete} style={{background:"#fff1f2",border:"none",borderRadius:6,padding:"5px 10px",color:"#e11d48",fontWeight:700,fontSize:12,cursor:"pointer",marginLeft:8,flexShrink:0}}>キャンセル</button>
             : <span style={{marginLeft:8,fontSize:11,color:"#cbd5e1",flexShrink:0}}>締切</span>
       )}
+    </div>
+  );
+}
+
+// ── QRコード表示コンポーネント ─────────────────────────
+function QRCodeImage({ text, size }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.QRCode) return;
+    ref.current.innerHTML = '';
+    new window.QRCode(ref.current, {
+      text,
+      width: size || 140,
+      height: size || 140,
+      correctLevel: window.QRCode.CorrectLevel.M
+    });
+  }, [text, size]);
+  return <div ref={ref} style={{display:"inline-block"}} />;
+}
+
+// ── QRコードをスキャン促す画面 ─────────────────────────
+function QRScanPrompt({ onOwnerClick }) {
+  return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#f0f4ff,#faf5ff)",padding:20}}>
+      <div style={{background:"#fff",borderRadius:24,padding:"44px 36px",width:"100%",maxWidth:380,boxShadow:"0 8px 40px rgba(79,70,229,0.12)",border:"1px solid #e2e8f0",textAlign:"center"}}>
+        <div style={{fontSize:72,marginBottom:16}}>📱</div>
+        <div style={{fontWeight:800,fontSize:22,color:"#1e293b",marginBottom:10}}>QRコードでログイン</div>
+        <div style={{fontSize:14,color:"#64748b",lineHeight:1.7,marginBottom:28}}>
+          テナント専用のQRコードをスキャンして<br/>ご利用ください。<br/>
+          <span style={{fontSize:12,color:"#94a3b8"}}>QRコードはオーナーよりお受け取りください。</span>
+        </div>
+        <div style={{borderTop:"1px solid #f1f5f9",paddingTop:20}}>
+          <button onClick={onOwnerClick} style={{background:"none",border:"none",color:"#94a3b8",fontSize:13,cursor:"pointer",textDecoration:"underline"}}>
+            👑 オーナーとしてログイン
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -239,7 +284,7 @@ function AvailabilityCalendar({bookings}) {
 }
 
 // ── オーナーログイン ──────────────────────────────────
-function OwnerLogin({onLogin}) {
+function OwnerLogin({onLogin, onBack}) {
   const [pw, setPw] = useState("");
   const [err, setErr] = useState(false);
   function tryLogin() {
@@ -260,6 +305,9 @@ function OwnerLogin({onLogin}) {
           style={{...inp,border:"1.5px solid "+(err?"#fda4af":"#e2e8f0"),marginBottom:12}} />
         {err && <div style={{color:"#e11d48",fontSize:13,marginBottom:8,textAlign:"center"}}>❌ パスワードが違います</div>}
         <button onClick={tryLogin} style={{...btnP,marginTop:4}}>ログイン</button>
+        {onBack && (
+          <button onClick={onBack} style={{marginTop:12,width:"100%",padding:"10px",borderRadius:10,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",fontWeight:700,fontSize:13,cursor:"pointer"}}>← 戻る</button>
+        )}
       </div>
     </div>
   );
@@ -337,6 +385,42 @@ function TenantSummary({tenants,bookings}) {
   );
 }
 
+// ── QRコード一覧（オーナー用） ─────────────────────────
+function QRCodeList({tenants}) {
+  const [search, setSearch] = useState("");
+  const filtered = tenants.filter(t => t.name.includes(search) && t.token);
+  return (
+    <section style={card}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:12}}>
+        <Label>テナント別QRコード</Label>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <input placeholder="🔍 絞り込み…" value={search} onChange={e=>setSearch(e.target.value)} style={{...inp,width:"auto",flex:1,minWidth:120,maxWidth:200}} />
+          <button onClick={()=>window.print()} className="no-print" style={{padding:"7px 14px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",color:"#4f46e5",fontWeight:700,fontSize:12,cursor:"pointer"}}>🖨️ 印刷</button>
+        </div>
+      </div>
+      <p style={{fontSize:12,color:"#94a3b8",marginBottom:14}}>各テナントにQRコードを配布してください。スキャンするとログインできます。</p>
+      <div className="qr-grid" style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:16}}>
+        {filtered.map(t => (
+          <div key={t.id} style={{border:"1px solid #e2e8f0",borderRadius:12,padding:"16px",textAlign:"center",background:"#fafafa"}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#1e293b",marginBottom:12}}>{t.name}</div>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:10}}>
+              <QRCodeImage text={tenantUrl(t.token)} size={140} />
+            </div>
+            <div style={{fontSize:10,color:"#94a3b8",wordBreak:"break-all",marginBottom:8,lineHeight:1.4}}>
+              {tenantUrl(t.token)}
+            </div>
+            <button
+              onClick={() => { navigator.clipboard.writeText(tenantUrl(t.token)); }}
+              className="no-print"
+              style={{padding:"5px 12px",borderRadius:6,border:"1px solid #e2e8f0",background:"#fff",color:"#4f46e5",fontWeight:700,fontSize:11,cursor:"pointer"}}
+            >URLをコピー</button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ── ローディング画面 ──────────────────────────────────
 function Loading() {
   return (
@@ -353,14 +437,18 @@ function Loading() {
 // ── メインアプリ ──────────────────────────────────────
 function App() {
   const [firebaseReady, setFirebaseReady] = useState(!!window.__firebaseReady);
-  const [tenants, setTenants] = useState(initTenants);
+  const [tenants, setTenants] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [view, setView] = useState("tenant");
   const [ownerAuthed, setOwnerAuthed] = useState(false);
-  const [currentId, setCurrentId] = useState(initTenants[0].id);
+  const [tenantAuthed, setTenantAuthed] = useState(false);
+  const [currentId, setCurrentId] = useState(null);
   const [form, setForm] = useState({room:ROOMS[0],date:today(),start:OPEN_HOUR,end:OPEN_HOUR+1});
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+
+  // URLトークンを一度だけ読む
+  const urlToken = useMemo(() => new URLSearchParams(window.location.search).get('token'), []);
 
   // Firebase 準備待ち
   useEffect(() => {
@@ -374,25 +462,27 @@ function App() {
   useEffect(() => {
     if(!firebaseReady) return;
     const db = window.__db;
-    const { collection, onSnapshot } = window.__fs;
+    const { collection, onSnapshot, doc, setDoc } = window.__fs;
 
-    // 予約データをリアルタイム取得
     const unsubBookings = onSnapshot(collection(db, "bookings"), snap => {
       const data = snap.docs.map(d => ({id: d.id, ...d.data()}));
       setBookings(data);
     });
 
-    // テナント名をリアルタイム取得
     const unsubTenants = onSnapshot(collection(db, "tenants"), snap => {
       if(snap.empty) {
-        // 初回：Firestoreにデフォルトテナントを保存
+        // 初回：トークン付きでテナントを作成
         initTenants.forEach(t => {
-          const { doc, setDoc } = window.__fs;
-          setDoc(doc(db, "tenants", t.id), { name: t.name });
+          setDoc(doc(db, "tenants", t.id), { name: t.name, token: generateToken() });
         });
       } else {
         const data = snap.docs.map(d => ({id: d.id, ...d.data()}));
-        // initTenantsの順序を維持してマージ
+        // トークンがないテナントには追加（マイグレーション）
+        data.forEach(tenant => {
+          if (!tenant.token) {
+            setDoc(doc(db, "tenants", tenant.id), { name: tenant.name, token: generateToken() });
+          }
+        });
         const merged = initTenants.map(t => {
           const found = data.find(d => d.id === t.id);
           return found ? found : t;
@@ -404,16 +494,25 @@ function App() {
     return () => { unsubBookings(); unsubTenants(); };
   }, [firebaseReady]);
 
-  const currentTenant = tenants.find(t=>t.id===currentId) || tenants[0];
+  // テナントロード後にURLトークンでログイン
+  useEffect(() => {
+    if (!urlToken || tenantAuthed || tenants.length === 0) return;
+    const match = tenants.find(t => t.token === urlToken);
+    if (match) {
+      setCurrentId(match.id);
+      setTenantAuthed(true);
+    }
+  }, [tenants, urlToken, tenantAuthed]);
 
-  // テナント名変更 → Firestore に保存
+  const currentTenant = tenants.find(t=>t.id===currentId) || null;
+
   async function renameTenant(id, newName) {
     const db = window.__db;
     const { doc, setDoc } = window.__fs;
-    await setDoc(doc(db, "tenants", id), { name: newName.trim() });
+    const tenant = tenants.find(t => t.id === id);
+    await setDoc(doc(db, "tenants", id), { name: newName.trim(), token: tenant?.token || generateToken() });
   }
 
-  // 予約追加 → Firestore に保存
   async function addBooking() {
     setError(""); setSuccess("");
     const {room, date} = form;
@@ -432,19 +531,19 @@ function App() {
     setSuccess("予約を受け付けました！");
   }
 
-  // 予約削除 → Firestore から削除
   async function removeBooking(id) {
     const db = window.__db;
     const { doc, deleteDoc } = window.__fs;
     await deleteDoc(doc(db, "bookings", id));
   }
 
-  const usedHours = calcUsedHours(bookings, currentId);
+  const usedHours = currentId ? calcUsedHours(bookings, currentId) : 0;
   const charge = calcExtraCharge(usedHours);
   const progressPct = Math.min((usedHours/FREE_HOURS)*100, 100);
   const isOver = usedHours > FREE_HOURS;
   const todayStr = today();
 
+  // オーナー用タイムグリッド（テナント名あり）
   function TimeGrid({room, date}) {
     const dayBooks = bookings.filter(b=>b.room===room&&b.date===date);
     return (
@@ -471,22 +570,30 @@ function App() {
   function handleOwnerLogout() { setOwnerAuthed(false); setView("tenant"); }
 
   if(!firebaseReady) return <Loading />;
-  if(view==="owner-login") return <OwnerLogin onLogin={handleOwnerLogin} />;
+  if(view==="owner-login") return <OwnerLogin onLogin={handleOwnerLogin} onBack={()=>setView("tenant")} />;
+
+  // QRコードなしでアクセスした場合（オーナーでない場合）
+  if(!tenantAuthed && view !== "owner") {
+    return <QRScanPrompt onOwnerClick={handleOwnerClick} />;
+  }
 
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#f0f4ff 0%,#faf5ff 100%)",paddingBottom:60}}>
-      <header style={{background:"#4f46e5",color:"#fff",padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 20px rgba(79,70,229,0.33)",flexWrap:"wrap",gap:8}}>
+      <header style={{background:"#4f46e5",color:"#fff",padding:"16px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:"0 4px 20px rgba(79,70,229,0.33)",flexWrap:"wrap",gap:8}} className="no-print">
         <div>
           <div style={{fontSize:10,letterSpacing:2,opacity:.75,textTransform:"uppercase"}}>ROOM BOOKING</div>
           <div style={{fontSize:20,fontWeight:800,letterSpacing:-0.5}}>会議室予約フォーム</div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-          <button onClick={()=>setView("tenant")} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="tenant"?"#fff":"rgba(255,255,255,.18)",color:view==="tenant"?"#4f46e5":"#fff"}}>🏢 テナント</button>
-          <button onClick={handleOwnerClick} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="owner"?"#fff":"rgba(255,255,255,.18)",color:view==="owner"?"#4f46e5":"#fff"}}>👑 オーナー</button>
+          {tenantAuthed && (
+            <button onClick={()=>setView("tenant")} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="tenant"?"#fff":"rgba(255,255,255,.18)",color:view==="tenant"?"#4f46e5":"#fff"}}>🏢 テナント</button>
+          )}
+          {ownerAuthed && (
+            <button onClick={()=>setView("owner")} style={{padding:"6px 14px",borderRadius:20,border:"none",fontWeight:700,fontSize:12,cursor:"pointer",background:view==="owner"?"#fff":"rgba(255,255,255,.18)",color:view==="owner"?"#4f46e5":"#fff"}}>👑 オーナー</button>
+          )}
           {view==="owner"&&ownerAuthed&&(
             <button onClick={handleOwnerLogout} style={{padding:"5px 10px",borderRadius:20,border:"1px solid rgba(255,255,255,.4)",fontWeight:700,fontSize:11,cursor:"pointer",background:"transparent",color:"rgba(255,255,255,.8)"}}>ログアウト</button>
           )}
-          {/* Firebase接続インジケーター */}
           <div style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:"rgba(255,255,255,0.85)",background:"rgba(255,255,255,0.15)",borderRadius:20,padding:"4px 10px"}}>
             <span style={{width:7,height:7,borderRadius:"50%",background:"#4ade80",display:"inline-block",flexShrink:0}}></span>
             Firebase同期中
@@ -497,13 +604,14 @@ function App() {
       <div style={{maxWidth:860,margin:"0 auto",padding:"20px 14px"}}>
 
         {/* ─── テナント画面 ─── */}
-        {view==="tenant"&&(<>
-          <section style={card}>
-            <Label>ログイン中のテナント</Label>
-            <div style={{marginTop:10}}>
-              <select value={currentId} onChange={e=>{setCurrentId(e.target.value);setError("");setSuccess("");}} style={sel}>
-                {tenants.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
+        {view==="tenant"&&tenantAuthed&&currentTenant&&(<>
+          <section style={{...card,background:"#f0f4ff",border:"1.5px solid #c7d2fe"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{fontSize:32}}>🏢</div>
+              <div>
+                <div style={{fontSize:12,color:"#6366f1",fontWeight:600,marginBottom:2}}>ログイン中</div>
+                <div style={{fontSize:20,fontWeight:800,color:"#1e293b"}}>{currentTenant.name}</div>
+              </div>
             </div>
           </section>
 
@@ -537,14 +645,18 @@ function App() {
 
           <section style={card}>
             <Label>予約済み一覧（{currentTenant.name}）</Label>
-            {bookings.length===0?<Empty>予約はまだありません</Empty>
-              :[...bookings].filter(b=>b.tenantId===currentId).sort((a,b)=>a.date.localeCompare(b.date)).map(b=><BookingRow key={b.id} b={b} tenants={tenants} onDelete={()=>removeBooking(b.id)} showDelete isOwner={false} />)}
+            {bookings.filter(b=>b.tenantId===currentId).length===0
+              ?<Empty>予約はまだありません</Empty>
+              :[...bookings].filter(b=>b.tenantId===currentId).sort((a,b)=>a.date.localeCompare(b.date)).map(b=>(
+                <BookingRow key={b.id} b={b} tenants={tenants} onDelete={()=>removeBooking(b.id)} showDelete isOwner={false} showTenant={false} />
+              ))}
           </section>
         </>)}
 
         {/* ─── オーナー画面 ─── */}
         {view==="owner"&&ownerAuthed&&(<>
           <TenantEditor tenants={tenants} bookings={bookings} onRename={renameTenant} />
+          <QRCodeList tenants={tenants} />
           <AvailabilityCalendar bookings={bookings} />
           <section style={card}>
             <Label>本日のタイムライン（{todayStr}）</Label>
